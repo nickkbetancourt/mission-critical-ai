@@ -75,6 +75,44 @@ function createId(prefix) {
   return prefix + "_" + id;
 }
 
+function sanitizeWorkspaceId(value) {
+  const cleaned = String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return cleaned || "demo-factory";
+}
+
+function getWorkspaceId(request, body = null) {
+  const url = new URL(request.url);
+  return sanitizeWorkspaceId(
+    request.headers.get("x-mca-workspace")
+      || body?.workspaceId
+      || url.searchParams.get("workspace")
+      || "demo-factory",
+  );
+}
+
+function getUser(request) {
+  return {
+    email: request.headers.get("cf-access-authenticated-user-email") || "anonymous",
+    authMode: request.headers.get("cf-access-authenticated-user-email") ? "cloudflare-access" : "public",
+  };
+}
+
+function isAuthorized(request, env) {
+  if (!env?.MCA_API_TOKEN) return true;
+  const authorization = request.headers.get("authorization") || "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : request.headers.get("x-mca-token");
+  return token === env.MCA_API_TOKEN;
+}
+
+function requireAuthorized(request, env) {
+  if (isAuthorized(request, env)) return null;
+  return jsonResponse({ error: "Unauthorized" }, 401);
+}
+
 function normalizeSourceType(type) {
   const value = String(type || "").toLowerCase();
   if (value.includes("datadog")) return "datadog";
@@ -280,14 +318,46 @@ function generateIncidentReport(summaries = []) {
   };
 }
 
-async function maybeStore(env, prefix, record) {
+function storageKey(workspaceId, prefix, record) {
+  return ["workspace", workspaceId, prefix, record.createdAt, record.id].join(":");
+}
+
+async function maybeStore(env, workspaceId, prefix, record) {
   if (env?.MCA_EVENTS && typeof env.MCA_EVENTS.put === "function") {
-    await env.MCA_EVENTS.put(prefix + ":" + record.id, JSON.stringify(record), {
+    const key = storageKey(workspaceId, prefix, record);
+    const storedRecord = { ...record, workspaceId, key };
+    await env.MCA_EVENTS.put(key, JSON.stringify(storedRecord), {
       expirationTtl: 60 * 60 * 24 * 90,
+      metadata: {
+        workspaceId,
+        type: prefix,
+        createdAt: record.createdAt,
+      },
     });
     return true;
   }
   return false;
+}
+
+async function listStored(env, workspaceId, type = "all", limit = 25) {
+  if (!env?.MCA_EVENTS || typeof env.MCA_EVENTS.list !== "function") {
+    return { persisted: false, records: [] };
+  }
+  const prefixes = type === "all" ? ["audit", "upload", "report"] : [type];
+  const batches = await Promise.all(prefixes.map(async (prefix) => {
+    const listed = await env.MCA_EVENTS.list({
+      prefix: "workspace:" + workspaceId + ":" + prefix + ":",
+      limit,
+    });
+    return listed.keys.map((key) => key.name);
+  }));
+  const keys = batches.flat().slice(0, limit);
+  const values = await Promise.all(keys.map((key) => env.MCA_EVENTS.get(key, "json")));
+  const records = values
+    .filter(Boolean)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, limit);
+  return { persisted: true, records };
 }
 
 async function handleApi(request, env) {
@@ -295,34 +365,65 @@ async function handleApi(request, env) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204 });
   }
+  const limit = Math.max(1, Math.min(100, Number.parseInt(url.searchParams.get("limit") || "25", 10)));
+  const unauthorized = request.method !== "GET" ? requireAuthorized(request, env) : null;
+  if (unauthorized) return unauthorized;
   if (url.pathname === "/api/health" && request.method === "GET") {
-    return jsonResponse({ ok: true, service: "mission-critical-ai", version: "real-intake-v1" });
+    return jsonResponse({
+      ok: true,
+      service: "mission-critical-ai",
+      version: "workspace-storage-v1",
+      persistence: Boolean(env?.MCA_EVENTS),
+      authRequired: Boolean(env?.MCA_API_TOKEN),
+    });
+  }
+  if (url.pathname === "/api/workspace" && request.method === "GET") {
+    const workspaceId = getWorkspaceId(request);
+    return jsonResponse({
+      workspaceId,
+      user: getUser(request),
+      persistence: Boolean(env?.MCA_EVENTS),
+      authRequired: Boolean(env?.MCA_API_TOKEN),
+    });
+  }
+  if (url.pathname === "/api/events" && request.method === "GET") {
+    const workspaceId = getWorkspaceId(request);
+    const type = url.searchParams.get("type") || "all";
+    const result = await listStored(env, workspaceId, type, limit);
+    return jsonResponse({ workspaceId, type, ...result });
   }
   if (url.pathname === "/api/audit-requests" && request.method === "POST") {
     const body = await readJson(request);
     if (!body) return jsonResponse({ error: "Invalid JSON request body." }, 400);
+    const workspaceId = getWorkspaceId(request, body);
     const record = {
       id: createId("audit"),
+      type: "audit",
+      workspaceId,
       createdAt: new Date().toISOString(),
       status: "received",
       contact: body.contact || {},
       riskContext: body.riskContext || {},
+      user: getUser(request),
       source: "web",
     };
-    record.persisted = await maybeStore(env, "audit", record);
+    record.persisted = await maybeStore(env, workspaceId, "audit", record);
     return jsonResponse(record, 202);
   }
   if (url.pathname === "/api/uploads" && request.method === "POST") {
     const body = await readJson(request);
     if (!body) return jsonResponse({ error: "Invalid JSON request body." }, 400);
+    const workspaceId = getWorkspaceId(request, body);
     try {
       const summary = analyzeUpload(body);
       const record = {
         id: createId("upload"),
+        workspaceId,
         createdAt: new Date().toISOString(),
+        user: getUser(request),
         ...summary,
       };
-      record.persisted = await maybeStore(env, "upload", record);
+      record.persisted = await maybeStore(env, workspaceId, "upload", record);
       return jsonResponse(record, 202);
     } catch (error) {
       return jsonResponse({ error: error.message || "Unable to parse upload." }, 400);
@@ -331,12 +432,17 @@ async function handleApi(request, env) {
   if (url.pathname === "/api/incident-report" && request.method === "POST") {
     const body = await readJson(request);
     if (!body) return jsonResponse({ error: "Invalid JSON request body." }, 400);
+    const workspaceId = getWorkspaceId(request, body);
     const summaries = Array.isArray(body.summaries) ? body.summaries : [];
     const report = {
       id: createId("report"),
+      type: "report",
+      workspaceId,
+      createdAt: new Date().toISOString(),
+      user: getUser(request),
       ...generateIncidentReport(summaries),
     };
-    report.persisted = await maybeStore(env, "report", report);
+    report.persisted = await maybeStore(env, workspaceId, "report", report);
     return jsonResponse(report);
   }
   return jsonResponse({ error: "Not found" }, 404);
@@ -1295,6 +1401,8 @@ const page = `<!doctype html>
       const reportFix = document.querySelector("#reportFix");
       const reportCustomer = document.querySelector("#reportCustomer");
       const uploadedSummaries = [];
+      const workspaceId = localStorage.getItem("mcaWorkspaceId") || "demo-factory";
+      localStorage.setItem("mcaWorkspaceId", workspaceId);
 
       const racks = [
         { name: "Rack 12", temp: "68°F", cells: ["cool","cool","cool","warm","cool","cool","warm","warm","cool","cool","cool","warm"] },
@@ -1325,8 +1433,22 @@ const page = `<!doctype html>
       async function apiPost(path, payload) {
         const response = await fetch(path, {
           method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
+          headers: {
+            "content-type": "application/json",
+            "x-mca-workspace": workspaceId,
+          },
+          body: JSON.stringify({ workspaceId, ...payload }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Request failed");
+        }
+        return data;
+      }
+
+      async function apiGet(path) {
+        const response = await fetch(path, {
+          headers: { "x-mca-workspace": workspaceId },
         });
         const data = await response.json();
         if (!response.ok) {
@@ -1455,6 +1577,16 @@ const page = `<!doctype html>
       });
 
       renderRacks(false);
+      apiGet("/api/workspace")
+        .then((workspace) => addMessage("Mission Critical AI", "Workspace " + workspace.workspaceId + " connected. Persistence: " + (workspace.persistence ? "enabled" : "local-only until KV binding is deployed") + "."))
+        .catch(() => {});
+      apiGet("/api/events?limit=3")
+        .then((history) => {
+          if (history.records.length) {
+            addMessage("Mission Critical AI", history.records.length + " stored workspace event(s) loaded from Cloudflare KV.");
+          }
+        })
+        .catch(() => {});
     </script>
   </body>
 </html>`;

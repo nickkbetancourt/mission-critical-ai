@@ -2,3 +2,7 @@ name = "mission-critical-ai"
 main = "worker/index.js"
 compatibility_date = "2026-06-25"
 workers_dev = true
+
+[[kv_namespaces]]
+binding = "MCA_EVENTS"
+id = "f335fd6f2e0249cdabafb6c5531ecf5c"

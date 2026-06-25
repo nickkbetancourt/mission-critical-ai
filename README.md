@@ -8,14 +8,23 @@ The current app is intentionally dependency-free: a single ESM Worker serves the
 - File-backed intake for Datadog monitor exports, Grafana dashboard JSON, NVIDIA DCGM metrics CSV, and Kubernetes / Slurm incident logs.
 - API-generated incident reports covering root cause, revenue at risk, impacted GPUs, recommended fix, and customer message.
 - GPU fleet, thermal map, telemetry, and copilot dashboard sections using demo data.
-- Optional persistence through an `MCA_EVENTS` KV binding when one is configured.
+- Cloudflare KV persistence through the `MCA_EVENTS` binding.
+- Workspace scoping through the `x-mca-workspace` header, request body `workspaceId`, or `?workspace=` query parameter.
 
 ## API Routes
 
 - `GET /api/health`
+- `GET /api/workspace`
+- `GET /api/events?type=all&limit=25`
 - `POST /api/audit-requests`
 - `POST /api/uploads`
 - `POST /api/incident-report`
+
+## Persistence And Auth
+
+`wrangler.toml` binds `MCA_EVENTS` to Cloudflare KV. Audit requests, telemetry upload summaries, and generated reports are stored under workspace-scoped keys for 90 days.
+
+Mutating API routes can be protected by setting a Cloudflare Worker secret named `MCA_API_TOKEN`. When that secret exists, clients must send `Authorization: Bearer <token>` or `x-mca-token: <token>`.
 
 ## Build And Validate
 
