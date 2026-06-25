@@ -515,6 +515,77 @@ const page = `<!doctype html>
         padding: 0 14px;
       }
 
+      .landing-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(320px, 0.72fr);
+        gap: 18px;
+        margin-top: 18px;
+      }
+
+      .proof-grid, .workflow-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .proof-card, .workflow-card, .upload-card, .report-card, .lead-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0a1320;
+        padding: 14px;
+      }
+
+      .proof-card strong, .workflow-card strong { display: block; font-size: 20px; margin-bottom: 6px; }
+      .proof-card span, .workflow-card span, .upload-card p, .report-card p, .lead-card p { color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+      .view { display: none; }
+      .view.active { display: block; }
+
+      .dashboard-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: flex-start;
+        margin-bottom: 18px;
+      }
+
+      .upload-zone {
+        display: grid;
+        place-items: center;
+        min-height: 138px;
+        border: 1px dashed rgba(34, 211, 238, 0.52);
+        border-radius: 8px;
+        background: rgba(34, 211, 238, 0.07);
+        text-align: center;
+        padding: 18px;
+      }
+
+      .upload-zone b { display: block; margin-bottom: 6px; }
+      .progress { height: 8px; border-radius: 999px; background: #172638; overflow: hidden; margin-top: 12px; }
+      .progress i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--cyan), var(--green)); transition: width .45s ease; }
+
+      .report-output {
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #07111b;
+        padding: 14px;
+        color: #dbeaf5;
+        font-size: 13px;
+        line-height: 1.55;
+        white-space: pre-line;
+      }
+
+      .lead-form { display: grid; gap: 10px; margin-top: 12px; }
+      .lead-form input {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #08111c;
+        color: var(--text);
+        padding: 11px 12px;
+      }
+      .lead-success { display: none; color: #86efac; font-size: 13px; margin-top: 10px; }
+
       .footer-note {
         margin: 16px 0 4px;
         color: var(--muted);
@@ -523,15 +594,15 @@ const page = `<!doctype html>
       }
 
       @media (max-width: 1050px) {
-        .hero, .main-grid { grid-template-columns: 1fr; }
-        .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .hero, .main-grid, .landing-grid { grid-template-columns: 1fr; }
+        .grid, .proof-grid, .workflow-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       }
 
       @media (max-width: 720px) {
         .shell { padding: 14px; }
         .topbar { align-items: flex-start; flex-direction: column; }
         .nav { justify-content: flex-start; }
-        .grid, .rack-grid { grid-template-columns: 1fr; }
+        .grid, .rack-grid, .proof-grid, .workflow-grid { grid-template-columns: 1fr; }
         .gpu-row { grid-template-columns: 1fr; }
         .gpu-row.header { display: none; }
         .risk-header, .section-title { flex-direction: column; }
@@ -550,15 +621,15 @@ const page = `<!doctype html>
             <p>Protect the AI Factory</p>
           </div>
         </div>
-        <nav class="nav" aria-label="Dashboard sections">
-          <span class="pill"><span class="status-dot"></span>Live demo data</span>
-          <button class="active" type="button">Command</button>
-          <button type="button">Racks</button>
-          <button type="button">Incidents</button>
-          <button type="button">Revenue</button>
+        <nav class="nav" aria-label="Primary navigation">
+          <span class="pill"><span class="status-dot"></span>Live telemetry mock</span>
+          <button class="active" data-view="landing" type="button">Landing</button>
+          <button data-view="dashboard" type="button">Dashboard</button>
+          <button id="navAudit" type="button">Book Risk Audit</button>
         </nav>
       </header>
 
+      <div class="view active" id="landingView">
       <section class="hero">
         <div class="panel hero-main">
           <p class="eyebrow">AI Factory Intelligence Layer</p>
@@ -569,8 +640,8 @@ const page = `<!doctype html>
             their signals mean for uptime, capacity, and revenue.
           </p>
           <div class="hero-actions">
-            <button class="primary" id="simulateIncident" type="button">Simulate Rack 17 Incident</button>
-            <button class="secondary" id="resolveIncident" type="button">Resolve Cooling Risk</button>
+            <button class="primary" id="openDashboard" type="button">Open Operations Dashboard</button>
+            <button class="secondary" id="heroAudit" type="button">Book AI Factory Risk Audit</button>
           </div>
         </div>
 
@@ -592,6 +663,55 @@ const page = `<!doctype html>
           </div>
         </aside>
       </section>
+
+      <section class="landing-grid">
+        <div class="panel section">
+          <div class="section-title"><div><h3>Built for infrastructure operators</h3><p>Connect observability exports, quantify business impact, and produce executive-ready incident narratives.</p></div></div>
+          <div class="proof-grid">
+            <div class="proof-card"><strong>Datadog</strong><span>Parse monitor exports, logs, and service tags into correlated GPU fleet events.</span></div>
+            <div class="proof-card"><strong>Grafana</strong><span>Turn dashboard snapshots and panel JSON into capacity and thermal risk findings.</span></div>
+            <div class="proof-card"><strong>DCGM / K8s</strong><span>Map GPU health, pods, tenants, and jobs to revenue exposure and SLA risk.</span></div>
+          </div>
+        </div>
+        <aside class="panel section lead-card" id="auditCard">
+          <div class="section-title"><div><h3>Book AI Factory Risk Audit</h3><p>Share your fleet size and biggest reliability concern. We will prepare a mock risk readout.</p></div></div>
+          <form class="lead-form" id="leadForm">
+            <input id="leadEmail" type="email" placeholder="Work email" aria-label="Work email" required>
+            <input id="leadCompany" placeholder="Company / GPU fleet size" aria-label="Company and GPU fleet size" required>
+            <button class="primary" type="submit">Request audit</button>
+          </form>
+          <div class="lead-success" id="leadSuccess">Audit request captured. We will follow up with an AI Factory risk brief.</div>
+        </aside>
+      </section>
+      </div>
+
+      <div class="view" id="dashboardView">
+        <div class="dashboard-head">
+          <div>
+            <p class="eyebrow">Operations dashboard</p>
+            <h2 style="margin:0;font-size:clamp(28px,4vw,46px)">AI Factory command center</h2>
+          </div>
+          <div class="hero-actions" style="margin-top:0">
+            <button class="primary" id="simulateIncident" type="button">Simulate Rack 17 Incident</button>
+            <button class="secondary" id="resolveIncident" type="button">Resolve Cooling Risk</button>
+          </div>
+        </div>
+
+        <section class="grid" aria-label="Data ingestion and incident workflow">
+          <div class="panel upload-card">
+            <h3>Upload Datadog/Grafana export</h3>
+            <div class="upload-zone" id="uploadZone"><div><b>Drop export JSON / CSV</b><span>Mock import: datadog_monitors.json + grafana_panels.json</span><div class="progress"><i id="uploadProgress"></i></div></div></div>
+            <button class="secondary" id="mockUpload" type="button" style="margin-top:12px">Run mock upload</button>
+          </div>
+          <div class="panel report-card">
+            <h3>Incident report generator</h3>
+            <p>Generate an operator, customer success, and executive incident narrative from the current risk state.</p>
+            <button class="primary" id="generateReport" type="button">Generate report</button>
+            <div class="report-output" id="reportOutput">No report generated yet.</div>
+          </div>
+          <div class="panel workflow-card"><strong>Workflow</strong><span id="workflowStatus">Awaiting telemetry export. Upload to enrich RCA and quantify revenue at risk.</span></div>
+          <div class="panel workflow-card"><strong>Governance</strong><span>Every generated recommendation is tied to source telemetry, tenant impact, and an approval step.</span></div>
+        </section>
 
       <section class="grid" aria-label="Executive summary">
         <div class="panel metric">
@@ -740,9 +860,10 @@ const page = `<!doctype html>
           </div>
         </section>
       </main>
+      </div>
 
       <p class="footer-note">
-        Prototype data for customer discovery. Next build: import Datadog/Grafana/DCGM exports and generate real incident reports.
+        Mock SaaS experience for customer discovery: landing page, operations dashboard, telemetry import, incident reports, and risk-audit lead capture.
       </p>
     </div>
 
@@ -756,6 +877,18 @@ const page = `<!doctype html>
       const idleLeakage = document.querySelector("#idleLeakage");
       const slaRisk = document.querySelector("#slaRisk");
       const copilotStatus = document.querySelector("#copilotStatus");
+      const landingView = document.querySelector("#landingView");
+      const dashboardView = document.querySelector("#dashboardView");
+      const workflowStatus = document.querySelector("#workflowStatus");
+      const uploadProgress = document.querySelector("#uploadProgress");
+      const reportOutput = document.querySelector("#reportOutput");
+
+      function showView(name) {
+        const landing = name === "landing";
+        landingView.classList.toggle("active", landing);
+        dashboardView.classList.toggle("active", !landing);
+        document.querySelectorAll(".nav button[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
+      }
 
       const racks = [
         { name: "Rack 12", temp: "68°F", cells: ["cool","cool","cool","warm","cool","cool","warm","warm","cool","cool","cool","warm"] },
@@ -821,7 +954,31 @@ const page = `<!doctype html>
         input.value = "";
       });
 
-      document.querySelectorAll(".nav button, .mini-controls button").forEach((button) => {
+      document.querySelectorAll(".nav button[data-view]").forEach((button) => {
+        button.addEventListener("click", () => showView(button.dataset.view));
+      });
+
+      document.querySelector("#openDashboard").addEventListener("click", () => showView("dashboard"));
+      document.querySelector("#heroAudit").addEventListener("click", () => document.querySelector("#auditCard").scrollIntoView({ behavior: "smooth" }));
+      document.querySelector("#navAudit").addEventListener("click", () => { showView("landing"); document.querySelector("#auditCard").scrollIntoView({ behavior: "smooth" }); });
+
+      document.querySelector("#mockUpload").addEventListener("click", () => {
+        uploadProgress.style.width = "100%";
+        workflowStatus.textContent = "Telemetry imported: 42 monitors, 18 Grafana panels, 6 DCGM anomalies, and 2 tenant-impact mappings correlated.";
+        addMessage("Mission Critical AI", "Datadog and Grafana export imported. Rack 17 thermal alert correlates with CRAC Loop A pressure degradation and elevated H100 power draw.");
+      });
+
+      document.querySelector("#generateReport").addEventListener("click", () => {
+        reportOutput.textContent = "INC-2026-0617 / Rack 17 Thermal Risk\nSummary: Cooling Loop A degradation is increasing inlet temperature for miami-h100-prod.\nImpact: " + impactedGpu.textContent + " exposed, " + riskRevenue.textContent + " revenue at risk, SLA risk " + slaRisk.textContent + ".\nActions: drain workloads from 17A-17F, inspect CRAC Loop A, notify enterprise-priority tenants, and review idle GPU leakage after stabilization.";
+      });
+
+      document.querySelector("#leadForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        document.querySelector("#leadSuccess").style.display = "block";
+        event.currentTarget.reset();
+      });
+
+      document.querySelectorAll(".mini-controls button").forEach((button) => {
         button.addEventListener("click", () => {
           [...button.parentElement.querySelectorAll("button")].forEach((item) => item.classList.remove("active"));
           button.classList.add("active");
