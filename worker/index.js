@@ -89,7 +89,7 @@ const page = `<!doctype html>
         justify-content: flex-end;
       }
 
-      .pill, .nav button {
+      .pill, .nav button, .nav-cta {
         border: 1px solid var(--line);
         border-radius: 999px;
         background: rgba(12, 22, 34, 0.8);
@@ -100,6 +100,14 @@ const page = `<!doctype html>
 
       .nav button {
         cursor: pointer;
+      }
+
+      .nav-cta {
+        border-color: rgba(34, 211, 238, 0.72);
+        background: linear-gradient(135deg, rgba(34, 211, 238, 0.24), rgba(59, 130, 246, 0.2));
+        color: #d9fbff;
+        cursor: pointer;
+        font-weight: 900;
       }
 
       .nav button.active {
@@ -188,6 +196,11 @@ const page = `<!doctype html>
       .primary {
         background: linear-gradient(135deg, var(--cyan), var(--blue));
         color: #03111a;
+      }
+
+      .audit-cta {
+        box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.28), 0 12px 34px rgba(34, 211, 238, 0.22);
+        font-size: 15px;
       }
 
       .secondary {
@@ -305,6 +318,13 @@ const page = `<!doctype html>
       .main-grid {
         display: grid;
         grid-template-columns: minmax(0, 1.15fr) minmax(340px, 0.85fr);
+        gap: 18px;
+        margin-top: 18px;
+      }
+
+      .mvp-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(340px, 0.78fr);
         gap: 18px;
         margin-top: 18px;
       }
@@ -446,6 +466,85 @@ const page = `<!doctype html>
       .sev-med { background: rgba(250, 204, 21, 0.14); color: #fde68a; }
       .sev-low { background: rgba(34, 197, 94, 0.14); color: #86efac; }
 
+      .upload-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .upload-card {
+        display: grid;
+        gap: 12px;
+        min-height: 150px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0a1320;
+        padding: 14px;
+      }
+
+      .upload-card h4 {
+        margin: 0;
+        font-size: 15px;
+      }
+
+      .upload-card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .mock-upload {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        border: 1px dashed rgba(141, 161, 179, 0.5);
+        border-radius: 8px;
+        padding: 10px;
+        color: #c6d8e6;
+        font-size: 12px;
+      }
+
+      .mock-upload button {
+        border: 0;
+        border-radius: 8px;
+        background: rgba(34, 211, 238, 0.14);
+        color: var(--cyan);
+        cursor: pointer;
+        font-weight: 900;
+        padding: 7px 10px;
+      }
+
+      .report-list {
+        display: grid;
+        gap: 11px;
+      }
+
+      .report-item {
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 11px;
+      }
+
+      .report-item:last-child { border-bottom: 0; padding-bottom: 0; }
+
+      .report-item span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 900;
+        letter-spacing: 0.04em;
+        margin-bottom: 5px;
+        text-transform: uppercase;
+      }
+
+      .report-item p {
+        margin: 0;
+        color: #d6e6f2;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
       .copilot {
         display: grid;
         gap: 12px;
@@ -523,7 +622,7 @@ const page = `<!doctype html>
       }
 
       @media (max-width: 1050px) {
-        .hero, .main-grid { grid-template-columns: 1fr; }
+        .hero, .main-grid, .mvp-grid { grid-template-columns: 1fr; }
         .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       }
 
@@ -531,7 +630,7 @@ const page = `<!doctype html>
         .shell { padding: 14px; }
         .topbar { align-items: flex-start; flex-direction: column; }
         .nav { justify-content: flex-start; }
-        .grid, .rack-grid { grid-template-columns: 1fr; }
+        .grid, .rack-grid, .upload-grid { grid-template-columns: 1fr; }
         .gpu-row { grid-template-columns: 1fr; }
         .gpu-row.header { display: none; }
         .risk-header, .section-title { flex-direction: column; }
@@ -556,6 +655,7 @@ const page = `<!doctype html>
           <button type="button">Racks</button>
           <button type="button">Incidents</button>
           <button type="button">Revenue</button>
+          <button class="nav-cta" id="bookAuditNav" type="button">Book AI Factory Risk Audit</button>
         </nav>
       </header>
 
@@ -569,6 +669,7 @@ const page = `<!doctype html>
             their signals mean for uptime, capacity, and revenue.
           </p>
           <div class="hero-actions">
+            <button class="primary audit-cta" id="bookAuditHero" type="button">Book AI Factory Risk Audit</button>
             <button class="primary" id="simulateIncident" type="button">Simulate Rack 17 Incident</button>
             <button class="secondary" id="resolveIncident" type="button">Resolve Cooling Risk</button>
           </div>
@@ -614,6 +715,80 @@ const page = `<!doctype html>
           <strong class="info">14</strong>
           <small>This week</small>
         </div>
+      </section>
+
+      <section class="mvp-grid" aria-label="MVP intake and incident report">
+        <section class="panel section">
+          <div class="section-title">
+            <div>
+              <h3>Upload Datadog / Grafana / DCGM Export</h3>
+              <p>Mock intake for telemetry exports used to generate operator-ready RCA.</p>
+            </div>
+            <span class="pill">Mock flow</span>
+          </div>
+          <div class="upload-grid">
+            <div class="upload-card">
+              <div>
+                <h4>Datadog monitor export</h4>
+                <p>Import alert history, monitor thresholds, tags, and customer-facing service ownership.</p>
+              </div>
+              <div class="mock-upload"><span>datadog-monitors.json</span><button type="button">Upload</button></div>
+            </div>
+            <div class="upload-card">
+              <div>
+                <h4>Grafana dashboard JSON</h4>
+                <p>Parse panels for GPU temperature, power draw, memory pressure, and utilization windows.</p>
+              </div>
+              <div class="mock-upload"><span>grafana-gpu-dashboard.json</span><button type="button">Upload</button></div>
+            </div>
+            <div class="upload-card">
+              <div>
+                <h4>NVIDIA DCGM metrics CSV</h4>
+                <p>Attach device-level thermals, ECC errors, clocks, power caps, and throttling indicators.</p>
+              </div>
+              <div class="mock-upload"><span>dcgm-rack-17.csv</span><button type="button">Upload</button></div>
+            </div>
+            <div class="upload-card">
+              <div>
+                <h4>Kubernetes / Slurm incident logs</h4>
+                <p>Correlate pod evictions, failed jobs, queue delays, node drains, and workload migrations.</p>
+              </div>
+              <div class="mock-upload"><span>k8s-slurm-incident.log</span><button type="button">Upload</button></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel section">
+          <div class="section-title">
+            <div>
+              <h3>AI Incident Report</h3>
+              <p>Generated draft for operators, leadership, and customer success.</p>
+            </div>
+            <span class="severity sev-high">Draft</span>
+          </div>
+          <div class="report-list">
+            <div class="report-item">
+              <span>Root cause</span>
+              <p>Cooling Loop A degradation caused Rack 17 inlet temperature to rise while H100 utilization stayed above 90%.</p>
+            </div>
+            <div class="report-item">
+              <span>Revenue at risk</span>
+              <p>$1,280/hr from exposed training and inference workloads, escalating to $1,920/hr if throttling begins.</p>
+            </div>
+            <div class="report-item">
+              <span>Impacted GPUs</span>
+              <p>8 H100s currently exposed across nodes 17A-17D; 12 H100s in the high-risk radius.</p>
+            </div>
+            <div class="report-item">
+              <span>Recommended fix</span>
+              <p>Drain priority jobs from Rack 17, rebalance to Rack 12 or Rack 21, and inspect CRAC Loop A pump efficiency.</p>
+            </div>
+            <div class="report-item">
+              <span>Customer message</span>
+              <p>We detected a cooling anomaly before service degradation and are proactively shifting workloads to preserve SLA commitments.</p>
+            </div>
+          </div>
+        </section>
       </section>
 
       <main class="main-grid">
@@ -819,6 +994,19 @@ const page = `<!doctype html>
         addMessage("Operator", question, true);
         addMessage("Mission Critical AI", "Two customer workloads are exposed: a training job on miami-h100-prod and a batch inference queue tagged enterprise-priority. Estimated customer-facing SLA risk is medium unless workloads are shifted within the next 30 minutes.");
         input.value = "";
+      });
+
+      document.querySelectorAll(".mock-upload button").forEach((button) => {
+        button.addEventListener("click", () => {
+          button.textContent = "Queued";
+          button.disabled = true;
+        });
+      });
+
+      document.querySelectorAll("#bookAuditHero, #bookAuditNav").forEach((button) => {
+        button.addEventListener("click", () => {
+          addMessage("Mission Critical AI", "Risk audit request captured. The mock handoff includes telemetry coverage, incident workflow maturity, revenue exposure, and GPU fleet readiness.");
+        });
       });
 
       document.querySelectorAll(".nav button, .mini-controls button").forEach((button) => {
