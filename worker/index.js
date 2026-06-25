@@ -1,3 +1,347 @@
+const sampleTelemetry = {
+  datadog: {
+    fileName: "datadog-monitors.json",
+    content: JSON.stringify([
+      {
+        name: "Rack 17 inlet temperature above threshold",
+        overall_state: "Alert",
+        tags: ["site:miami", "rack:17", "customer:enterprise-priority"],
+        query: "avg(last_5m):avg:gpu.inlet_temp{rack:17} > 84",
+      },
+      {
+        name: "Cooling Loop A flow degradation",
+        overall_state: "Alert",
+        tags: ["site:miami", "cooling_loop:a"],
+        query: "avg(last_5m):avg:cooling.flow_pct{loop:a} < 88",
+      },
+    ], null, 2),
+  },
+  grafana: {
+    fileName: "grafana-gpu-dashboard.json",
+    content: JSON.stringify({
+      title: "GPU Factory Operations",
+      panels: [
+        { title: "Rack 17 GPU Temperature", datasource: { type: "prometheus", uid: "dcgm" } },
+        { title: "GPU Power Draw", datasource: { type: "prometheus", uid: "dcgm" } },
+        { title: "Kubernetes Pod Evictions", datasource: { type: "loki", uid: "k8s" } },
+      ],
+    }, null, 2),
+  },
+  dcgm: {
+    fileName: "dcgm-rack-17.csv",
+    content: [
+      "timestamp,node,gpu_uuid,temperature_c,utilization_gpu,power_w,memory_used_mb",
+      "2026-06-25T17:00:00Z,17A,GPU-1,86,94,682,72192",
+      "2026-06-25T17:00:00Z,17B,GPU-2,88,97,701,73812",
+      "2026-06-25T17:00:00Z,17C,GPU-3,84,92,664,69988",
+      "2026-06-25T17:00:00Z,17D,GPU-4,87,95,690,72420",
+      "2026-06-25T17:05:00Z,17A,GPU-1,89,96,708,73192",
+      "2026-06-25T17:05:00Z,17B,GPU-2,91,98,716,74400",
+    ].join("\n"),
+  },
+  logs: {
+    fileName: "k8s-slurm-incident.log",
+    content: [
+      "2026-06-25T17:03:11Z kubelet node=17A warning thermal-pressure pod=train-enterprise-priority",
+      "2026-06-25T17:04:28Z slurm node=17B job=88421 warning requeue requested due to node temperature",
+      "2026-06-25T17:06:02Z cluster-autoscaler node=17C drain recommended cooling-loop-a",
+      "2026-06-25T17:07:45Z kubelet node=17D eviction threshold crossed memory-pressure=false thermal=true",
+    ].join("\n"),
+  },
+};
+
+function jsonResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload, null, 2), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+async function readJson(request) {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
+}
+
+function createId(prefix) {
+  const id = typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+  return prefix + "_" + id;
+}
+
+function normalizeSourceType(type) {
+  const value = String(type || "").toLowerCase();
+  if (value.includes("datadog")) return "datadog";
+  if (value.includes("grafana")) return "grafana";
+  if (value.includes("dcgm") || value.includes("csv")) return "dcgm";
+  if (value.includes("kubernetes") || value.includes("slurm") || value.includes("log")) return "logs";
+  return value || "unknown";
+}
+
+function parseCsv(text) {
+  const lines = String(text || "").trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return [];
+  const headers = splitCsvLine(lines[0]).map((header) => header.trim());
+  return lines.slice(1).map((line) => {
+    const values = splitCsvLine(line);
+    return headers.reduce((row, header, index) => {
+      row[header] = values[index] ? values[index].trim() : "";
+      return row;
+    }, {});
+  });
+}
+
+function splitCsvLine(line) {
+  const values = [];
+  let current = "";
+  let quoted = false;
+  for (const character of String(line || "")) {
+    if (character === '"') {
+      quoted = !quoted;
+    } else if (character === "," && !quoted) {
+      values.push(current);
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  values.push(current);
+  return values;
+}
+
+function numeric(value) {
+  const number = Number.parseFloat(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function collectGrafanaPanels(value, panels = []) {
+  if (!value || typeof value !== "object") return panels;
+  if (Array.isArray(value.panels)) {
+    for (const panel of value.panels) {
+      panels.push(panel);
+      collectGrafanaPanels(panel, panels);
+    }
+  }
+  if (Array.isArray(value.rows)) {
+    for (const row of value.rows) collectGrafanaPanels(row, panels);
+  }
+  return panels;
+}
+
+function analyzeDatadog(content, fileName) {
+  const parsed = JSON.parse(content);
+  const monitors = Array.isArray(parsed) ? parsed : Array.isArray(parsed.monitors) ? parsed.monitors : [parsed];
+  const alerting = monitors.filter((monitor) => /alert|warn/i.test(String(monitor.overall_state || monitor.state || "")));
+  const tags = unique(monitors.flatMap((monitor) => Array.isArray(monitor.tags) ? monitor.tags : []));
+  return {
+    type: "datadog",
+    fileName,
+    sourceName: "Datadog",
+    status: "processed",
+    monitorCount: monitors.length,
+    alertCount: alerting.length,
+    tags,
+    signals: alerting.map((monitor) => monitor.name || monitor.query || "Unnamed Datadog monitor"),
+    severity: alerting.length ? "high" : "low",
+    summary: alerting.length
+      ? alerting.length + " active Datadog monitor(s) indicate service-impacting infrastructure risk."
+      : "Datadog monitors imported with no active alert state.",
+  };
+}
+
+function analyzeGrafana(content, fileName) {
+  const dashboard = JSON.parse(content);
+  const panels = collectGrafanaPanels(dashboard);
+  const titles = panels.map((panel) => panel.title).filter(Boolean);
+  const datasources = unique(panels.map((panel) => {
+    if (!panel.datasource) return "";
+    return typeof panel.datasource === "string" ? panel.datasource : panel.datasource.uid || panel.datasource.type || "";
+  }));
+  return {
+    type: "grafana",
+    fileName,
+    sourceName: "Grafana",
+    status: "processed",
+    dashboardTitle: dashboard.title || "Untitled dashboard",
+    panelCount: panels.length,
+    datasources,
+    signals: titles,
+    severity: titles.some((title) => /temp|thermal|power|eviction|error/i.test(title)) ? "medium" : "low",
+    summary: panels.length + " Grafana panel(s) mapped into the incident context.",
+  };
+}
+
+function analyzeDcgm(content, fileName) {
+  const rows = parseCsv(content);
+  const temperatureKey = Object.keys(rows[0] || {}).find((key) => /temp/i.test(key));
+  const utilizationKey = Object.keys(rows[0] || {}).find((key) => /util/i.test(key));
+  const powerKey = Object.keys(rows[0] || {}).find((key) => /power/i.test(key));
+  const gpuKey = Object.keys(rows[0] || {}).find((key) => /gpu|uuid/i.test(key));
+  const nodeKey = Object.keys(rows[0] || {}).find((key) => /node|host/i.test(key));
+  const temperatures = rows.map((row) => numeric(row[temperatureKey]));
+  const utilizations = rows.map((row) => numeric(row[utilizationKey]));
+  const powers = rows.map((row) => numeric(row[powerKey]));
+  const gpus = unique(rows.map((row) => row[gpuKey]));
+  const nodes = unique(rows.map((row) => row[nodeKey]));
+  const maxTemperatureC = Math.max(0, ...temperatures);
+  const averageUtilization = utilizations.length
+    ? Math.round(utilizations.reduce((sum, value) => sum + value, 0) / utilizations.length)
+    : 0;
+  return {
+    type: "dcgm",
+    fileName,
+    sourceName: "NVIDIA DCGM",
+    status: "processed",
+    rowCount: rows.length,
+    gpuCount: gpus.length,
+    nodes,
+    maxTemperatureC,
+    averageUtilization,
+    maxPowerW: Math.max(0, ...powers),
+    severity: maxTemperatureC >= 85 ? "high" : maxTemperatureC >= 78 ? "medium" : "low",
+    summary: "DCGM parsed " + rows.length + " metric row(s), " + gpus.length + " GPU(s), max temperature " + maxTemperatureC + "C.",
+  };
+}
+
+function analyzeLogs(content, fileName) {
+  const lines = String(content || "").split(/\r?\n/).filter(Boolean);
+  const lower = lines.map((line) => line.toLowerCase());
+  const thermalEvents = lower.filter((line) => /thermal|temperature|cooling|overheat/.test(line)).length;
+  const workloadEvents = lower.filter((line) => /evict|drain|requeue|failed|timeout|oom/.test(line)).length;
+  const nodes = unique(lines.flatMap((line) => line.match(/\b(?:node=)?(?:rack-)?17[A-F]\b|\bnode-[\w-]+\b/gi) || []));
+  return {
+    type: "logs",
+    fileName,
+    sourceName: "Kubernetes / Slurm",
+    status: "processed",
+    lineCount: lines.length,
+    thermalEvents,
+    workloadEvents,
+    nodes,
+    severity: thermalEvents || workloadEvents ? "high" : "low",
+    summary: thermalEvents + " thermal event(s) and " + workloadEvents + " workload impact event(s) detected in logs.",
+  };
+}
+
+function analyzeUpload(input) {
+  const type = normalizeSourceType(input.type);
+  const sample = sampleTelemetry[type];
+  const content = String(input.content || sample?.content || "");
+  const fileName = input.fileName || sample?.fileName || "upload.txt";
+  if (!content.trim()) {
+    throw new Error("Upload content is required.");
+  }
+  if (type === "datadog") return analyzeDatadog(content, fileName);
+  if (type === "grafana") return analyzeGrafana(content, fileName);
+  if (type === "dcgm") return analyzeDcgm(content, fileName);
+  if (type === "logs") return analyzeLogs(content, fileName);
+  throw new Error("Unsupported upload type: " + type);
+}
+
+function generateIncidentReport(summaries = []) {
+  const dcgm = summaries.find((summary) => summary.type === "dcgm");
+  const datadog = summaries.find((summary) => summary.type === "datadog");
+  const logs = summaries.find((summary) => summary.type === "logs");
+  const grafana = summaries.find((summary) => summary.type === "grafana");
+  const sourceCount = summaries.length;
+  const gpuCount = Math.max(dcgm?.gpuCount || 0, 8);
+  const highRiskGpus = Math.max(gpuCount, logs?.nodes?.length || 0, 8);
+  const revenue = highRiskGpus * 160;
+  const temperature = dcgm?.maxTemperatureC || 88;
+  const rootCause = temperature >= 85 || logs?.thermalEvents
+    ? "Cooling degradation is driving elevated GPU inlet temperatures while production workloads remain highly utilized."
+    : datadog?.alertCount
+      ? "Datadog alerts indicate infrastructure risk that needs telemetry correlation before customer impact expands."
+      : "Telemetry indicates a latent AI Factory risk pattern that should be validated against GPU and scheduler data.";
+  const recommendedFix = temperature >= 85
+    ? "Drain priority jobs from affected Rack 17 nodes, rebalance workloads to healthy racks, and inspect Cooling Loop A flow and pump efficiency."
+    : "Correlate monitor state with DCGM and scheduler logs, then rebalance workloads away from any node showing thermal or scheduler pressure.";
+  return {
+    rootCause,
+    revenueAtRisk: "$" + revenue.toLocaleString("en-US") + "/hr",
+    impactedGpus: highRiskGpus + " H100s",
+    recommendedFix,
+    customerMessage: "We detected an infrastructure risk before confirmed service degradation and are proactively shifting workloads to preserve SLA commitments.",
+    confidence: sourceCount >= 3 ? "High" : sourceCount >= 1 ? "Medium" : "Demo baseline",
+    sourceCount,
+    generatedAt: new Date().toISOString(),
+    evidence: summaries.map((summary) => summary.summary).filter(Boolean),
+    grafanaPanels: grafana?.panelCount || 0,
+  };
+}
+
+async function maybeStore(env, prefix, record) {
+  if (env?.MCA_EVENTS && typeof env.MCA_EVENTS.put === "function") {
+    await env.MCA_EVENTS.put(prefix + ":" + record.id, JSON.stringify(record), {
+      expirationTtl: 60 * 60 * 24 * 90,
+    });
+    return true;
+  }
+  return false;
+}
+
+async function handleApi(request, env) {
+  const url = new URL(request.url);
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204 });
+  }
+  if (url.pathname === "/api/health" && request.method === "GET") {
+    return jsonResponse({ ok: true, service: "mission-critical-ai", version: "real-intake-v1" });
+  }
+  if (url.pathname === "/api/audit-requests" && request.method === "POST") {
+    const body = await readJson(request);
+    if (!body) return jsonResponse({ error: "Invalid JSON request body." }, 400);
+    const record = {
+      id: createId("audit"),
+      createdAt: new Date().toISOString(),
+      status: "received",
+      contact: body.contact || {},
+      riskContext: body.riskContext || {},
+      source: "web",
+    };
+    record.persisted = await maybeStore(env, "audit", record);
+    return jsonResponse(record, 202);
+  }
+  if (url.pathname === "/api/uploads" && request.method === "POST") {
+    const body = await readJson(request);
+    if (!body) return jsonResponse({ error: "Invalid JSON request body." }, 400);
+    try {
+      const summary = analyzeUpload(body);
+      const record = {
+        id: createId("upload"),
+        createdAt: new Date().toISOString(),
+        ...summary,
+      };
+      record.persisted = await maybeStore(env, "upload", record);
+      return jsonResponse(record, 202);
+    } catch (error) {
+      return jsonResponse({ error: error.message || "Unable to parse upload." }, 400);
+    }
+  }
+  if (url.pathname === "/api/incident-report" && request.method === "POST") {
+    const body = await readJson(request);
+    if (!body) return jsonResponse({ error: "Invalid JSON request body." }, 400);
+    const summaries = Array.isArray(body.summaries) ? body.summaries : [];
+    const report = {
+      id: createId("report"),
+      ...generateIncidentReport(summaries),
+    };
+    report.persisted = await maybeStore(env, "report", report);
+    return jsonResponse(report);
+  }
+  return jsonResponse({ error: "Not found" }, 404);
+}
+
 const page = `<!doctype html>
 <html lang="en">
   <head>
@@ -516,6 +860,20 @@ const page = `<!doctype html>
         padding: 7px 10px;
       }
 
+      .mock-upload button:disabled {
+        cursor: default;
+        opacity: 0.75;
+      }
+
+      .file-input {
+        inline-size: 1px;
+        block-size: 1px;
+        opacity: 0;
+        overflow: hidden;
+        position: absolute;
+        pointer-events: none;
+      }
+
       .report-list {
         display: grid;
         gap: 11px;
@@ -724,36 +1082,36 @@ const page = `<!doctype html>
               <h3>Upload Datadog / Grafana / DCGM Export</h3>
               <p>Mock intake for telemetry exports used to generate operator-ready RCA.</p>
             </div>
-            <span class="pill">Mock flow</span>
+            <span class="pill">API intake</span>
           </div>
           <div class="upload-grid">
-            <div class="upload-card">
+            <div class="upload-card" data-upload-type="datadog">
               <div>
                 <h4>Datadog monitor export</h4>
                 <p>Import alert history, monitor thresholds, tags, and customer-facing service ownership.</p>
               </div>
-              <div class="mock-upload"><span>datadog-monitors.json</span><button type="button">Upload</button></div>
+              <div class="mock-upload"><span class="upload-file">datadog-monitors.json</span><input class="file-input" type="file" accept=".json,application/json"><button type="button">Upload</button></div>
             </div>
-            <div class="upload-card">
+            <div class="upload-card" data-upload-type="grafana">
               <div>
                 <h4>Grafana dashboard JSON</h4>
                 <p>Parse panels for GPU temperature, power draw, memory pressure, and utilization windows.</p>
               </div>
-              <div class="mock-upload"><span>grafana-gpu-dashboard.json</span><button type="button">Upload</button></div>
+              <div class="mock-upload"><span class="upload-file">grafana-gpu-dashboard.json</span><input class="file-input" type="file" accept=".json,application/json"><button type="button">Upload</button></div>
             </div>
-            <div class="upload-card">
+            <div class="upload-card" data-upload-type="dcgm">
               <div>
                 <h4>NVIDIA DCGM metrics CSV</h4>
                 <p>Attach device-level thermals, ECC errors, clocks, power caps, and throttling indicators.</p>
               </div>
-              <div class="mock-upload"><span>dcgm-rack-17.csv</span><button type="button">Upload</button></div>
+              <div class="mock-upload"><span class="upload-file">dcgm-rack-17.csv</span><input class="file-input" type="file" accept=".csv,text/csv"><button type="button">Upload</button></div>
             </div>
-            <div class="upload-card">
+            <div class="upload-card" data-upload-type="logs">
               <div>
                 <h4>Kubernetes / Slurm incident logs</h4>
                 <p>Correlate pod evictions, failed jobs, queue delays, node drains, and workload migrations.</p>
               </div>
-              <div class="mock-upload"><span>k8s-slurm-incident.log</span><button type="button">Upload</button></div>
+              <div class="mock-upload"><span class="upload-file">k8s-slurm-incident.log</span><input class="file-input" type="file" accept=".log,.txt,text/plain"><button type="button">Upload</button></div>
             </div>
           </div>
         </section>
@@ -769,23 +1127,23 @@ const page = `<!doctype html>
           <div class="report-list">
             <div class="report-item">
               <span>Root cause</span>
-              <p>Cooling Loop A degradation caused Rack 17 inlet temperature to rise while H100 utilization stayed above 90%.</p>
+              <p id="reportRootCause">Cooling Loop A degradation caused Rack 17 inlet temperature to rise while H100 utilization stayed above 90%.</p>
             </div>
             <div class="report-item">
               <span>Revenue at risk</span>
-              <p>$1,280/hr from exposed training and inference workloads, escalating to $1,920/hr if throttling begins.</p>
+              <p id="reportRevenue">$1,280/hr from exposed training and inference workloads, escalating to $1,920/hr if throttling begins.</p>
             </div>
             <div class="report-item">
               <span>Impacted GPUs</span>
-              <p>8 H100s currently exposed across nodes 17A-17D; 12 H100s in the high-risk radius.</p>
+              <p id="reportGpus">8 H100s currently exposed across nodes 17A-17D; 12 H100s in the high-risk radius.</p>
             </div>
             <div class="report-item">
               <span>Recommended fix</span>
-              <p>Drain priority jobs from Rack 17, rebalance to Rack 12 or Rack 21, and inspect CRAC Loop A pump efficiency.</p>
+              <p id="reportFix">Drain priority jobs from Rack 17, rebalance to Rack 12 or Rack 21, and inspect CRAC Loop A pump efficiency.</p>
             </div>
             <div class="report-item">
               <span>Customer message</span>
-              <p>We detected a cooling anomaly before service degradation and are proactively shifting workloads to preserve SLA commitments.</p>
+              <p id="reportCustomer">We detected a cooling anomaly before service degradation and are proactively shifting workloads to preserve SLA commitments.</p>
             </div>
           </div>
         </section>
@@ -931,6 +1289,12 @@ const page = `<!doctype html>
       const idleLeakage = document.querySelector("#idleLeakage");
       const slaRisk = document.querySelector("#slaRisk");
       const copilotStatus = document.querySelector("#copilotStatus");
+      const reportRootCause = document.querySelector("#reportRootCause");
+      const reportRevenue = document.querySelector("#reportRevenue");
+      const reportGpus = document.querySelector("#reportGpus");
+      const reportFix = document.querySelector("#reportFix");
+      const reportCustomer = document.querySelector("#reportCustomer");
+      const uploadedSummaries = [];
 
       const racks = [
         { name: "Rack 12", temp: "68°F", cells: ["cool","cool","cool","warm","cool","cool","warm","warm","cool","cool","cool","warm"] },
@@ -956,6 +1320,33 @@ const page = `<!doctype html>
         node.innerHTML = "<small>" + role + "</small><p>" + text + "</p>";
         copilot.appendChild(node);
         node.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+
+      async function apiPost(path, payload) {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Request failed");
+        }
+        return data;
+      }
+
+      function updateReport(report) {
+        reportRootCause.textContent = report.rootCause;
+        reportRevenue.textContent = report.revenueAtRisk + " from currently correlated telemetry.";
+        reportGpus.textContent = report.impactedGpus + " in the current risk model. Confidence: " + report.confidence + ".";
+        reportFix.textContent = report.recommendedFix;
+        reportCustomer.textContent = report.customerMessage;
+      }
+
+      async function refreshReport() {
+        const report = await apiPost("/api/incident-report", { summaries: uploadedSummaries });
+        updateReport(report);
+        return report;
       }
 
       document.querySelector("#simulateIncident").addEventListener("click", () => {
@@ -997,15 +1388,62 @@ const page = `<!doctype html>
       });
 
       document.querySelectorAll(".mock-upload button").forEach((button) => {
+        const card = button.closest(".upload-card");
+        const input = card.querySelector(".file-input");
+        const fileLabel = card.querySelector(".upload-file");
         button.addEventListener("click", () => {
-          button.textContent = "Queued";
+          input.click();
+        });
+        input.addEventListener("change", async () => {
+          const file = input.files[0];
+          if (!file) return;
+          const originalText = button.textContent;
+          button.textContent = "Parsing";
           button.disabled = true;
+          fileLabel.textContent = file.name;
+          try {
+            const content = await file.text();
+            const summary = await apiPost("/api/uploads", {
+              type: card.dataset.uploadType,
+              fileName: file.name,
+              content,
+            });
+            uploadedSummaries.push(summary);
+            button.textContent = "Processed";
+            addMessage("Mission Critical AI", summary.summary);
+            const report = await refreshReport();
+            riskRevenue.textContent = report.revenueAtRisk;
+            impactedGpu.textContent = report.impactedGpus;
+          } catch (error) {
+            button.textContent = originalText;
+            button.disabled = false;
+            addMessage("Mission Critical AI", "Upload failed: " + error.message);
+          }
         });
       });
 
       document.querySelectorAll("#bookAuditHero, #bookAuditNav").forEach((button) => {
-        button.addEventListener("click", () => {
-          addMessage("Mission Critical AI", "Risk audit request captured. The mock handoff includes telemetry coverage, incident workflow maturity, revenue exposure, and GPU fleet readiness.");
+        button.addEventListener("click", async () => {
+          const originalText = button.textContent;
+          button.textContent = "Booking";
+          button.disabled = true;
+          try {
+            const request = await apiPost("/api/audit-requests", {
+              contact: { source: "dashboard-cta" },
+              riskContext: {
+                riskScore: riskScore.textContent,
+                revenueAtRisk: riskRevenue.textContent,
+                impactedGpus: impactedGpu.textContent,
+                uploadedSources: uploadedSummaries.map((summary) => summary.type),
+              },
+            });
+            addMessage("Mission Critical AI", "Risk audit request " + request.id + " captured. We have the current telemetry context and can route this to an operator workflow.");
+            button.textContent = "Audit Requested";
+          } catch (error) {
+            button.textContent = originalText;
+            button.disabled = false;
+            addMessage("Mission Critical AI", "Audit request failed: " + error.message);
+          }
         });
       });
 
@@ -1023,10 +1461,14 @@ const page = `<!doctype html>
 
 export default {
   async fetch(request, env, ctx) {
-    void env;
     void ctx;
 
-    if (new URL(request.url).pathname !== "/") {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/")) {
+      return handleApi(request, env);
+    }
+
+    if (url.pathname !== "/") {
       return new Response("Not found", { status: 404 });
     }
 
