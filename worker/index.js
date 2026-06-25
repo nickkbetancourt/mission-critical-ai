@@ -68,6 +68,27 @@ async function readJson(request) {
   }
 }
 
+async function readUploadPayload(request) {
+  const contentType = request.headers.get("content-type") || "";
+  if (contentType.includes("multipart/form-data")) {
+    const form = await request.formData();
+    const file = form.get("file");
+    if (!file || typeof file.text !== "function") {
+      throw new Error("Multipart upload requires a file field named 'file'.");
+    }
+    return {
+      workspaceId: form.get("workspaceId") || undefined,
+      type: form.get("type") || undefined,
+      fileName: file.name || form.get("fileName") || "upload.txt",
+      content: await file.text(),
+      contentType: file.type || undefined,
+    };
+  }
+  const body = await readJson(request);
+  if (!body) throw new Error("Invalid JSON request body.");
+  return body;
+}
+
 function createId(prefix) {
   const id = typeof crypto !== "undefined" && crypto.randomUUID
     ? crypto.randomUUID()
@@ -117,9 +138,25 @@ function normalizeSourceType(type) {
   const value = String(type || "").toLowerCase();
   if (value.includes("datadog")) return "datadog";
   if (value.includes("grafana")) return "grafana";
-  if (value.includes("dcgm") || value.includes("csv")) return "dcgm";
-  if (value.includes("kubernetes") || value.includes("slurm") || value.includes("log")) return "logs";
+  if (value.includes("dcgm") || value.includes("nvidia") || value.includes("csv")) return "dcgm";
+  if (value.includes("kubernetes") || value.includes("k8s") || value.includes("slurm") || value.includes("log")) return "logs";
   return value || "unknown";
+}
+
+function detectSourceType({ type, fileName, content }) {
+  const explicit = normalizeSourceType(type);
+  if (explicit !== "unknown") return explicit;
+  const name = String(fileName || "").toLowerCase();
+  if (/datadog|monitor/.test(name)) return "datadog";
+  if (/grafana|dashboard/.test(name)) return "grafana";
+  if (/dcgm|nvidia|gpu.*csv|\.csv$/.test(name)) return "dcgm";
+  if (/kubernetes|k8s|slurm|incident|\.log$|\.txt$/.test(name)) return "logs";
+  const text = String(content || "").slice(0, 2000).toLowerCase();
+  if (/"overall_state"|"query"|"monitor"/.test(text)) return "datadog";
+  if (/"panels"|"dashboard"|"templating"/.test(text)) return "grafana";
+  if (/gpu_uuid|dcgm|temperature_c|utilization_gpu|power_w/.test(text)) return "dcgm";
+  if (/kubelet|slurm|pod|evict|node=/.test(text)) return "logs";
+  return "unknown";
 }
 
 function parseCsv(text) {
@@ -176,11 +213,36 @@ function collectGrafanaPanels(value, panels = []) {
   return panels;
 }
 
+function arrayFromUnknown(value, keys = []) {
+  if (Array.isArray(value)) return value;
+  for (const key of keys) {
+    if (Array.isArray(value?.[key])) return value[key];
+  }
+  return value && typeof value === "object" ? [value] : [];
+}
+
+function monitorState(monitor) {
+  return String(
+    monitor.overall_state
+      || monitor.overallState
+      || monitor.state
+      || monitor.status
+      || monitor.options?.silenced
+      || "",
+  );
+}
+
+function monitorName(monitor) {
+  return monitor.name || monitor.title || monitor.query || monitor.message || "Unnamed Datadog monitor";
+}
+
 function analyzeDatadog(content, fileName) {
   const parsed = JSON.parse(content);
-  const monitors = Array.isArray(parsed) ? parsed : Array.isArray(parsed.monitors) ? parsed.monitors : [parsed];
-  const alerting = monitors.filter((monitor) => /alert|warn/i.test(String(monitor.overall_state || monitor.state || "")));
+  const monitors = arrayFromUnknown(parsed, ["monitors", "data", "results"]);
+  const alerting = monitors.filter((monitor) => /alert|warn|no data|triggered|critical/i.test(monitorState(monitor)));
   const tags = unique(monitors.flatMap((monitor) => Array.isArray(monitor.tags) ? monitor.tags : []));
+  const queries = unique(monitors.map((monitor) => monitor.query || monitor.options?.query || "").filter(Boolean));
+  const customerTags = tags.filter((tag) => /^customer:|^service:|^team:|^env:/.test(String(tag)));
   return {
     type: "datadog",
     fileName,
@@ -189,7 +251,9 @@ function analyzeDatadog(content, fileName) {
     monitorCount: monitors.length,
     alertCount: alerting.length,
     tags,
-    signals: alerting.map((monitor) => monitor.name || monitor.query || "Unnamed Datadog monitor"),
+    customerTags,
+    queries,
+    signals: (alerting.length ? alerting : monitors).slice(0, 8).map(monitorName),
     severity: alerting.length ? "high" : "low",
     summary: alerting.length
       ? alerting.length + " active Datadog monitor(s) indicate service-impacting infrastructure risk."
@@ -198,13 +262,16 @@ function analyzeDatadog(content, fileName) {
 }
 
 function analyzeGrafana(content, fileName) {
-  const dashboard = JSON.parse(content);
+  const parsed = JSON.parse(content);
+  const dashboard = parsed.dashboard || parsed;
   const panels = collectGrafanaPanels(dashboard);
   const titles = panels.map((panel) => panel.title).filter(Boolean);
+  const targets = panels.flatMap((panel) => Array.isArray(panel.targets) ? panel.targets : []);
   const datasources = unique(panels.map((panel) => {
     if (!panel.datasource) return "";
     return typeof panel.datasource === "string" ? panel.datasource : panel.datasource.uid || panel.datasource.type || "";
   }));
+  const expressions = unique(targets.map((target) => target.expr || target.query || target.rawSql || target.refId || "").filter(Boolean));
   return {
     type: "grafana",
     fileName,
@@ -212,23 +279,28 @@ function analyzeGrafana(content, fileName) {
     status: "processed",
     dashboardTitle: dashboard.title || "Untitled dashboard",
     panelCount: panels.length,
+    targetCount: targets.length,
     datasources,
+    expressions: expressions.slice(0, 12),
     signals: titles,
-    severity: titles.some((title) => /temp|thermal|power|eviction|error/i.test(title)) ? "medium" : "low",
+    severity: [...titles, ...expressions].some((value) => /temp|thermal|power|eviction|error|throttle|dcgm/i.test(value)) ? "medium" : "low",
     summary: panels.length + " Grafana panel(s) mapped into the incident context.",
   };
 }
 
 function analyzeDcgm(content, fileName) {
   const rows = parseCsv(content);
+  if (!rows.length) throw new Error("DCGM CSV needs a header row and at least one metric row.");
   const temperatureKey = Object.keys(rows[0] || {}).find((key) => /temp/i.test(key));
   const utilizationKey = Object.keys(rows[0] || {}).find((key) => /util/i.test(key));
   const powerKey = Object.keys(rows[0] || {}).find((key) => /power/i.test(key));
+  const memoryKey = Object.keys(rows[0] || {}).find((key) => /mem|fb_used|memory/i.test(key));
   const gpuKey = Object.keys(rows[0] || {}).find((key) => /gpu|uuid/i.test(key));
   const nodeKey = Object.keys(rows[0] || {}).find((key) => /node|host/i.test(key));
   const temperatures = rows.map((row) => numeric(row[temperatureKey]));
   const utilizations = rows.map((row) => numeric(row[utilizationKey]));
   const powers = rows.map((row) => numeric(row[powerKey]));
+  const memories = rows.map((row) => numeric(row[memoryKey]));
   const gpus = unique(rows.map((row) => row[gpuKey]));
   const nodes = unique(rows.map((row) => row[nodeKey]));
   const maxTemperatureC = Math.max(0, ...temperatures);
@@ -246,6 +318,8 @@ function analyzeDcgm(content, fileName) {
     maxTemperatureC,
     averageUtilization,
     maxPowerW: Math.max(0, ...powers),
+    maxMemoryUsedMb: Math.max(0, ...memories),
+    throttleRiskRows: rows.filter((row) => numeric(row[temperatureKey]) >= 85 || numeric(row[powerKey]) >= 700).length,
     severity: maxTemperatureC >= 85 ? "high" : maxTemperatureC >= 78 ? "medium" : "low",
     summary: "DCGM parsed " + rows.length + " metric row(s), " + gpus.length + " GPU(s), max temperature " + maxTemperatureC + "C.",
   };
@@ -256,7 +330,9 @@ function analyzeLogs(content, fileName) {
   const lower = lines.map((line) => line.toLowerCase());
   const thermalEvents = lower.filter((line) => /thermal|temperature|cooling|overheat/.test(line)).length;
   const workloadEvents = lower.filter((line) => /evict|drain|requeue|failed|timeout|oom/.test(line)).length;
+  const customerEvents = lower.filter((line) => /customer|tenant|sla|priority|enterprise/.test(line)).length;
   const nodes = unique(lines.flatMap((line) => line.match(/\b(?:node=)?(?:rack-)?17[A-F]\b|\bnode-[\w-]+\b/gi) || []));
+  const jobIds = unique(lines.flatMap((line) => line.match(/\b(?:job=|jobid=)?\d{4,}\b/gi) || []));
   return {
     type: "logs",
     fileName,
@@ -265,14 +341,16 @@ function analyzeLogs(content, fileName) {
     lineCount: lines.length,
     thermalEvents,
     workloadEvents,
+    customerEvents,
     nodes,
+    jobIds,
     severity: thermalEvents || workloadEvents ? "high" : "low",
     summary: thermalEvents + " thermal event(s) and " + workloadEvents + " workload impact event(s) detected in logs.",
   };
 }
 
 function analyzeUpload(input) {
-  const type = normalizeSourceType(input.type);
+  const type = detectSourceType(input);
   const sample = sampleTelemetry[type];
   const content = String(input.content || sample?.content || "");
   const fileName = input.fileName || sample?.fileName || "upload.txt";
@@ -294,12 +372,15 @@ function generateIncidentReport(summaries = []) {
   const sourceCount = summaries.length;
   const gpuCount = Math.max(dcgm?.gpuCount || 0, 8);
   const highRiskGpus = Math.max(gpuCount, logs?.nodes?.length || 0, 8);
-  const revenue = highRiskGpus * 160;
+  const severityMultiplier = summaries.some((summary) => summary.severity === "high") ? 1.5 : summaries.some((summary) => summary.severity === "medium") ? 1.15 : 1;
+  const revenue = Math.round(highRiskGpus * 160 * severityMultiplier);
   const temperature = dcgm?.maxTemperatureC || 88;
+  const customerTags = datadog?.customerTags?.length ? " Customer/service tags: " + datadog.customerTags.join(", ") + "." : "";
+  const affectedNodes = logs?.nodes?.length ? " Affected nodes: " + logs.nodes.join(", ") + "." : "";
   const rootCause = temperature >= 85 || logs?.thermalEvents
-    ? "Cooling degradation is driving elevated GPU inlet temperatures while production workloads remain highly utilized."
+    ? "Cooling degradation is driving elevated GPU inlet temperatures while production workloads remain highly utilized." + affectedNodes
     : datadog?.alertCount
-      ? "Datadog alerts indicate infrastructure risk that needs telemetry correlation before customer impact expands."
+      ? "Datadog alerts indicate infrastructure risk that needs telemetry correlation before customer impact expands." + customerTags
       : "Telemetry indicates a latent AI Factory risk pattern that should be validated against GPU and scheduler data.";
   const recommendedFix = temperature >= 85
     ? "Drain priority jobs from affected Rack 17 nodes, rebalance workloads to healthy racks, and inspect Cooling Loop A flow and pump efficiency."
@@ -315,6 +396,9 @@ function generateIncidentReport(summaries = []) {
     generatedAt: new Date().toISOString(),
     evidence: summaries.map((summary) => summary.summary).filter(Boolean),
     grafanaPanels: grafana?.panelCount || 0,
+    datadogAlerts: datadog?.alertCount || 0,
+    dcgmMaxTemperatureC: dcgm?.maxTemperatureC || null,
+    logImpactEvents: logs ? logs.thermalEvents + logs.workloadEvents : 0,
   };
 }
 
@@ -411,10 +495,9 @@ async function handleApi(request, env) {
     return jsonResponse(record, 202);
   }
   if (url.pathname === "/api/uploads" && request.method === "POST") {
-    const body = await readJson(request);
-    if (!body) return jsonResponse({ error: "Invalid JSON request body." }, 400);
-    const workspaceId = getWorkspaceId(request, body);
     try {
+      const body = await readUploadPayload(request);
+      const workspaceId = getWorkspaceId(request, body);
       const summary = analyzeUpload(body);
       const record = {
         id: createId("upload"),
@@ -428,6 +511,44 @@ async function handleApi(request, env) {
     } catch (error) {
       return jsonResponse({ error: error.message || "Unable to parse upload." }, 400);
     }
+  }
+  if (url.pathname === "/api/imports" && request.method === "POST") {
+    const body = await readJson(request);
+    if (!body) return jsonResponse({ error: "Invalid JSON request body." }, 400);
+    const workspaceId = getWorkspaceId(request, body);
+    const uploads = Array.isArray(body.uploads) ? body.uploads : [];
+    if (!uploads.length) return jsonResponse({ error: "At least one upload is required." }, 400);
+    const records = [];
+    const errors = [];
+    for (const upload of uploads) {
+      try {
+        const summary = analyzeUpload(upload);
+        const record = {
+          id: createId("upload"),
+          workspaceId,
+          createdAt: new Date().toISOString(),
+          user: getUser(request),
+          ...summary,
+        };
+        record.persisted = await maybeStore(env, workspaceId, "upload", record);
+        records.push(record);
+      } catch (error) {
+        errors.push({
+          fileName: upload.fileName || "unknown",
+          error: error.message || "Unable to parse upload.",
+        });
+      }
+    }
+    const report = {
+      id: createId("report"),
+      type: "report",
+      workspaceId,
+      createdAt: new Date().toISOString(),
+      user: getUser(request),
+      ...generateIncidentReport(records),
+    };
+    report.persisted = await maybeStore(env, workspaceId, "report", report);
+    return jsonResponse({ workspaceId, records, report, errors }, errors.length ? 207 : 202);
   }
   if (url.pathname === "/api/incident-report" && request.method === "POST") {
     const body = await readJson(request);
@@ -1186,9 +1307,9 @@ const page = `<!doctype html>
           <div class="section-title">
             <div>
               <h3>Upload Datadog / Grafana / DCGM Export</h3>
-              <p>Mock intake for telemetry exports used to generate operator-ready RCA.</p>
+              <p>Import live telemetry exports and generate operator-ready RCA.</p>
             </div>
-            <span class="pill">API intake</span>
+            <span class="pill">Live import</span>
           </div>
           <div class="upload-grid">
             <div class="upload-card" data-upload-type="datadog">
@@ -1381,7 +1502,7 @@ const page = `<!doctype html>
       </main>
 
       <p class="footer-note">
-        Prototype data for customer discovery. Next build: import Datadog/Grafana/DCGM exports and generate real incident reports.
+        Imports, incident reports, and audit requests are workspace-scoped and persisted in Cloudflare KV.
       </p>
     </div>
 
@@ -1442,6 +1563,23 @@ const page = `<!doctype html>
         const data = await response.json();
         if (!response.ok) {
           throw new Error(data.error || "Request failed");
+        }
+        return data;
+      }
+
+      async function uploadFile(card, file) {
+        const body = new FormData();
+        body.set("workspaceId", workspaceId);
+        body.set("type", card.dataset.uploadType);
+        body.set("file", file, file.name);
+        const response = await fetch("/api/uploads", {
+          method: "POST",
+          headers: { "x-mca-workspace": workspaceId },
+          body,
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Upload failed");
         }
         return data;
       }
@@ -1524,12 +1662,7 @@ const page = `<!doctype html>
           button.disabled = true;
           fileLabel.textContent = file.name;
           try {
-            const content = await file.text();
-            const summary = await apiPost("/api/uploads", {
-              type: card.dataset.uploadType,
-              fileName: file.name,
-              content,
-            });
+            const summary = await uploadFile(card, file);
             uploadedSummaries.push(summary);
             button.textContent = "Processed";
             addMessage("Mission Critical AI", summary.summary);

@@ -96,4 +96,49 @@ assert.equal(events.body.workspaceId, workspaceId);
 assert.equal(events.body.persisted, true);
 assert.equal(events.body.records.length, 3);
 
+const form = new FormData();
+form.set("workspaceId", workspaceId);
+form.set("type", "datadog");
+form.set("file", new File([JSON.stringify([
+  {
+    name: "Smoke Datadog alert",
+    overall_state: "Alert",
+    tags: ["service:training", "customer:smoke"],
+    query: "avg(last_5m):avg:gpu.temperature{rack:17} > 85",
+  },
+])], "datadog-smoke.json", { type: "application/json" }));
+
+const multipart = await call("/api/uploads", {
+  method: "POST",
+  body: form,
+});
+assert.equal(multipart.response.status, 202);
+assert.equal(multipart.body.type, "datadog");
+assert.equal(multipart.body.alertCount, 1);
+assert.equal(multipart.body.persisted, true);
+
+const batch = await call("/api/imports", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    workspaceId,
+    uploads: [
+      {
+        fileName: "grafana-dashboard.json",
+        content: JSON.stringify({
+          title: "Smoke dashboard",
+          panels: [{ title: "GPU Temperature", targets: [{ expr: "DCGM_FI_DEV_GPU_TEMP" }] }],
+        }),
+      },
+      {
+        fileName: "k8s-slurm.log",
+        content: "2026-06-25T17:00:00Z kubelet node=17A warning thermal-pressure pod=train-enterprise-priority",
+      },
+    ],
+  }),
+});
+assert.equal(batch.response.status, 202);
+assert.equal(batch.body.records.length, 2);
+assert.equal(batch.body.report.persisted, true);
+
 console.log("API smoke test passed");

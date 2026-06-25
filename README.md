@@ -17,8 +17,16 @@ The current app is intentionally dependency-free: a single ESM Worker serves the
 - `GET /api/workspace`
 - `GET /api/events?type=all&limit=25`
 - `POST /api/audit-requests`
-- `POST /api/uploads`
+- `POST /api/uploads` with JSON or `multipart/form-data`
+- `POST /api/imports` for batch Datadog, Grafana, DCGM, Kubernetes, and Slurm imports
 - `POST /api/incident-report`
+
+## Supported Imports
+
+- Datadog monitor exports as JSON arrays, `monitors` objects, or API-style `data` / `results` payloads.
+- Grafana dashboard JSON, including exported dashboard wrappers and nested panel rows.
+- NVIDIA DCGM CSV metrics with temperature, utilization, power, memory, node, and GPU UUID columns.
+- Kubernetes and Slurm incident logs with thermal, eviction, drain, requeue, failed job, customer, and priority signals.
 
 ## Persistence And Auth
 
