@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "bash scripts/build.sh",
-    "validate": "node scripts/validate-artifact.mjs"
+    "validate": "node scripts/validate-artifact.mjs",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
   }
 }
